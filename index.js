@@ -1,19 +1,45 @@
 import { Client, GatewayIntentBits, Events } from 'discord.js';
 import OpenAI from 'openai';
+import http from 'http';
 
-// ── Configuration ──────────────────────────────────────────────────────────────
-const DISCORD_TOKEN = 'YOUR_DISCORD_BOT_TOKEN';   // 👈 Replace this
-const BOT_NAME      = 'Cleverly';
+// ── Configuration (reads from environment variables) ───────────────────────────
+const DISCORD_TOKEN  = process.env.DISCORD_TOKEN;
+const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
+const PORT           = process.env.PORT || 3000;
+const BOT_NAME       = 'Cleverly';
 
+// ── Validate env vars on startup ───────────────────────────────────────────────
+if (!DISCORD_TOKEN) {
+  console.error('❌ Missing DISCORD_TOKEN environment variable!');
+  process.exit(1);
+}
+if (!NVIDIA_API_KEY) {
+  console.error('❌ Missing NVIDIA_API_KEY environment variable!');
+  process.exit(1);
+}
+
+console.log('✅ DISCORD_TOKEN found:', DISCORD_TOKEN.slice(0, 10) + '...');
+console.log('✅ NVIDIA_API_KEY found:', NVIDIA_API_KEY.slice(0, 10) + '...');
+
+// ── HTTP keep-alive server (prevents Railway from sleeping) ────────────────────
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end(`${BOT_NAME} is alive and running! 🤖`);
+});
+
+server.listen(PORT, () => {
+  console.log(`🌐 Keep-alive server running on port ${PORT}`);
+});
+
+// ── OpenAI (NVIDIA) client ─────────────────────────────────────────────────────
 const openai = new OpenAI({
-  apiKey:  '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',
+  apiKey:  NVIDIA_API_KEY,
   baseURL: 'https://integrate.api.nvidia.com/v1',
 });
 
 // ── Conversation memory (per channel) ─────────────────────────────────────────
-// Stores the last N messages so Cleverly remembers context
 const MAX_HISTORY   = 10;
-const conversations = new Map(); // channelId → [ {role, content}, … ]
+const conversations = new Map();
 
 function getHistory(channelId) {
   if (!conversations.has(channelId)) conversations.set(channelId, []);
@@ -31,28 +57,52 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,   // Required to read message text
+    GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
   ],
 });
 
 client.once(Events.ClientReady, (bot) => {
   console.log(`✅ ${BOT_NAME} is online as ${bot.user.tag}`);
-  bot.user.setActivity('your questions 🤖', { type: 3 }); // "Watching your questions"
+  bot.user.setActivity('your questions 🤖', { type: 3 });
+
+  // ── Heartbeat log every 5 minutes so Railway knows the process is alive ──────
+  setInterval(() => {
+    console.log(`💓 Heartbeat — ${BOT_NAME} is still running at ${new Date().toISOString()}`);
+  }, 5 * 60 * 1000);
+});
+
+// ── Auto-reconnect on disconnect ───────────────────────────────────────────────
+client.on(Events.ShardDisconnect, (event, id) => {
+  console.warn(`⚠️ Shard ${id} disconnected. Code: ${event.code}. Reconnecting...`);
+});
+
+client.on(Events.ShardReconnecting, (id) => {
+  console.log(`🔄 Shard ${id} reconnecting...`);
+});
+
+client.on(Events.ShardResume, (id, replayed) => {
+  console.log(`✅ Shard ${id} resumed. Replayed ${replayed} events.`);
+});
+
+// ── Global error handlers (prevent crashes) ────────────────────────────────────
+process.on('unhandledRejection', (err) => {
+  console.error('⚠️ Unhandled rejection:', err);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('⚠️ Uncaught exception:', err);
 });
 
 // ── Message handler ────────────────────────────────────────────────────────────
 client.on(Events.MessageCreate, async (message) => {
-  // Ignore bots & messages that don't mention Cleverly (in servers)
   if (message.author.bot) return;
 
   const inDM      = !message.guild;
   const mentioned = message.mentions.has(client.user);
 
-  // Reply when: DM  OR  mentioned in a server
   if (!inDM && !mentioned) return;
 
-  // Strip the mention from the text
   const userText = message.content
     .replace(`<@${client.user.id}>`, '')
     .replace(`<@!${client.user.id}>`, '')
@@ -63,10 +113,8 @@ client.on(Events.MessageCreate, async (message) => {
     return;
   }
 
-  // Show typing indicator
   await message.channel.sendTyping();
 
-  // Build the messages array for the API
   const history = getHistory(message.channelId);
   addToHistory(message.channelId, 'user', userText);
 
@@ -82,7 +130,6 @@ client.on(Events.MessageCreate, async (message) => {
   ];
 
   try {
-    // Stream the response from NVIDIA / Qwen
     const stream = await openai.chat.completions.create({
       model:       'qwen/qwen3-coder-480b-a35b-instruct',
       messages:    apiMessages,
@@ -100,10 +147,8 @@ client.on(Events.MessageCreate, async (message) => {
     reply = reply.trim();
     if (!reply) reply = '🤔 Hmm, I got an empty response. Try again?';
 
-    // Save assistant reply to history
     addToHistory(message.channelId, 'assistant', reply);
 
-    // Discord has a 2000-char limit — split if needed
     if (reply.length <= 1990) {
       await message.reply(reply);
     } else {
