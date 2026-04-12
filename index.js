@@ -2,13 +2,16 @@ import { Client, GatewayIntentBits, Events } from 'discord.js';
 import OpenAI from 'openai';
 import http from 'http';
 
-// ── Configuration (reads from environment variables) ───────────────────────────
+// ── Configuration ──────────────────────────────────────────────────────────────
 const DISCORD_TOKEN  = process.env.DISCORD_TOKEN;
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
 const PORT           = process.env.PORT || 3000;
 const BOT_NAME       = 'Cleverly';
 
-// ── Validate env vars on startup ───────────────────────────────────────────────
+// ── The channel where Cleverly replies to everyone without mention ──────────────
+const FREE_CHAT_CHANNEL = 'chat-with-cleverly'; // 👈 must match your channel name exactly
+
+// ── Validate env vars ──────────────────────────────────────────────────────────
 if (!DISCORD_TOKEN) {
   console.error('❌ Missing DISCORD_TOKEN environment variable!');
   process.exit(1);
@@ -21,12 +24,11 @@ if (!NVIDIA_API_KEY) {
 console.log('✅ DISCORD_TOKEN found:', DISCORD_TOKEN.slice(0, 10) + '...');
 console.log('✅ NVIDIA_API_KEY found:', NVIDIA_API_KEY.slice(0, 10) + '...');
 
-// ── HTTP keep-alive server (prevents Railway from sleeping) ────────────────────
+// ── HTTP keep-alive server ─────────────────────────────────────────────────────
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end(`${BOT_NAME} is alive and running! 🤖`);
 });
-
 server.listen(PORT, () => {
   console.log(`🌐 Keep-alive server running on port ${PORT}`);
 });
@@ -66,43 +68,41 @@ client.once(Events.ClientReady, (bot) => {
   console.log(`✅ ${BOT_NAME} is online as ${bot.user.tag}`);
   bot.user.setActivity('your questions 🤖', { type: 3 });
 
-  // ── Heartbeat log every 5 minutes so Railway knows the process is alive ──────
   setInterval(() => {
-    console.log(`💓 Heartbeat — ${BOT_NAME} is still running at ${new Date().toISOString()}`);
+    console.log(`💓 Heartbeat — ${BOT_NAME} still running at ${new Date().toISOString()}`);
   }, 5 * 60 * 1000);
 });
 
-// ── Auto-reconnect on disconnect ───────────────────────────────────────────────
+// ── Auto-reconnect handlers ────────────────────────────────────────────────────
 client.on(Events.ShardDisconnect, (event, id) => {
-  console.warn(`⚠️ Shard ${id} disconnected. Code: ${event.code}. Reconnecting...`);
+  console.warn(`⚠️ Shard ${id} disconnected. Reconnecting...`);
 });
-
 client.on(Events.ShardReconnecting, (id) => {
   console.log(`🔄 Shard ${id} reconnecting...`);
 });
-
 client.on(Events.ShardResume, (id, replayed) => {
   console.log(`✅ Shard ${id} resumed. Replayed ${replayed} events.`);
 });
 
-// ── Global error handlers (prevent crashes) ────────────────────────────────────
-process.on('unhandledRejection', (err) => {
-  console.error('⚠️ Unhandled rejection:', err);
-});
-
-process.on('uncaughtException', (err) => {
-  console.error('⚠️ Uncaught exception:', err);
-});
+// ── Crash prevention ───────────────────────────────────────────────────────────
+process.on('unhandledRejection', (err) => console.error('⚠️ Unhandled rejection:', err));
+process.on('uncaughtException',  (err) => console.error('⚠️ Uncaught exception:', err));
 
 // ── Message handler ────────────────────────────────────────────────────────────
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
 
-  const inDM      = !message.guild;
-  const mentioned = message.mentions.has(client.user);
+  const inDM         = !message.guild;
+  const mentioned    = message.mentions.has(client.user);
+  const inFreeChannel = message.channel.name === FREE_CHAT_CHANNEL;
 
-  if (!inDM && !mentioned) return;
+  // Reply if:
+  // 1. It's a DM
+  // 2. Bot is mentioned anywhere
+  // 3. Message is in #chat-with-cleverly (no mention needed)
+  if (!inDM && !mentioned && !inFreeChannel) return;
 
+  // Strip mention if present
   const userText = message.content
     .replace(`<@${client.user.id}>`, '')
     .replace(`<@!${client.user.id}>`, '')
