@@ -48,9 +48,9 @@ function addToHistory(channelId, role, content) {
   if (history.length > MAX_HISTORY) history.splice(0, history.length - MAX_HISTORY);
 }
 
-// ── Image generation via NVIDIA ────────────────────────────────────────────────
+// ── Image generation via NVIDIA FLUX.1-schnell ─────────────────────────────────
 async function generateImage(prompt) {
-  const response = await fetch('https://ai.api.nvidia.com/v1/genai/stabilityai/stable-diffusion-3-medium', {
+  const response = await fetch('https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.1-schnell', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${IMAGE_GEN_NVDA}`,
@@ -59,11 +59,12 @@ async function generateImage(prompt) {
     },
     body: JSON.stringify({
       prompt,
-      cfg_scale: 5,
-      aspect_ratio: '1:1',
-      seed: 0,
-      steps: 50,
-      negative_prompt: '',
+      width: 1024,
+      height: 1024,
+      steps: 4,       // FLUX.1-schnell supports 1–4 steps
+      cfg_scale: 0,   // Must be 0 for schnell
+      seed: 0,        // 0 = random
+      samples: 1,
     }),
   });
 
@@ -74,8 +75,8 @@ async function generateImage(prompt) {
 
   const data = await response.json();
 
-  // NVIDIA returns base64 image
-  const b64 = data.artifacts?.[0]?.base64 || data.image;
+  // FLUX.1-schnell returns base64 image under artifacts[0].base64
+  const b64 = data.artifacts?.[0]?.base64;
   if (!b64) throw new Error('No image returned from API');
 
   return Buffer.from(b64, 'base64');
@@ -86,7 +87,7 @@ async function registerCommands(clientId) {
   const commands = [
     new SlashCommandBuilder()
       .setName('image')
-      .setDescription('Generate an image using AI')
+      .setDescription('Generate an image using FLUX.1-schnell AI')
       .addStringOption(opt =>
         opt.setName('prompt')
           .setDescription('Describe the image you want to generate')
