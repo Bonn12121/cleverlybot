@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Events, REST, Routes, SlashCommandBuilder, AttachmentBuilder } from 'discord.js';
+import { Client, GatewayIntentBits, Events, REST, Routes, SlashCommandBuilder, AttachmentBuilder, ActionRowBuilder, StringSelectMenuBuilder, StringSelectMenuOptionBuilder } from 'discord.js';
 import OpenAI from 'openai';
 import http from 'http';
 import fetch from 'node-fetch';
@@ -8,6 +8,20 @@ const DISCORD_TOKEN   = process.env.DISCORD_TOKEN;
 const NVIDIA_API_KEY  = process.env.NVIDIA_API_KEY;
 const IMAGE_GEN_NVDA  = process.env.IMAGE_GEN_NVDA;
 const PORT            = process.env.PORT || 3000;
+
+// ── Ratio → width/height map ───────────────────────────────────────────────────
+const RATIO_MAP = {
+  '1:1':  { width: 1024, height: 1024 },
+  '16:9': { width: 1344, height: 768  },
+  '9:16': { width: 768,  height: 1344 },
+  '5:4':  { width: 1152, height: 896  },
+  '4:5':  { width: 896,  height: 1152 },
+  '3:2':  { width: 1216, height: 832  },
+  '2:3':  { width: 832,  height: 1216 },
+};
+
+// Temp store: interactionId → prompt (while user picks ratio)
+const pendingImages = new Map();
 const BOT_NAME        = 'Cleverly';
 const FREE_CHAT_CHANNEL = 'chat-with-cleverly';
 
@@ -48,36 +62,41 @@ function addToHistory(channelId, role, content) {
   if (history.length > MAX_HISTORY) history.splice(0, history.length - MAX_HISTORY);
 }
 
-// ── Image generation via NVIDIA FLUX.1-schnell ─────────────────────────────────
-async function generateImage(prompt) {
-  const response = await fetch('https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.1-schnell', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${IMAGE_GEN_NVDA}`,
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-    },
-    body: JSON.stringify({
-      prompt,
-      width: 1024,
-      height: 1024,
-      steps: 4,       // FLUX.1-schnell supports 1–4 steps
-      cfg_scale: 0,   // Must be 0 for schnell
-      seed: 0,        // 0 = random
-      samples: 1,
-    }),
-  });
+// ── Image generation via FLUX.1-schnell (NVIDIA) ───────────────────────────────
+async function generateImage(prompt, width = 1344, height = 768) {
+  const response = await fetch(
+    'https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.2-klein-4b',
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${IMAGE_GEN_NVDA}`,
+        'Content-Type':  'application/json',
+        'Accept':        'application/json',
+      },
+      body: JSON.stringify({
+        prompt,
+        width,
+        height,
+        seed:   0,
+        steps:  4,
+      }),
+    }
+  );
 
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Image API error: ${err}`);
+  if (response.status !== 200) {
+    const err = await (await response.blob()).text();
+    throw new Error(`Image API error ${response.status}: ${err}`);
   }
 
   const data = await response.json();
 
-  // FLUX.1-schnell returns base64 image under artifacts[0].base64
-  const b64 = data.artifacts?.[0]?.base64;
-  if (!b64) throw new Error('No image returned from API');
+  // NVIDIA returns base64 under data[0].b64_json or artifacts[0].base64
+  const b64 =
+    data?.artifacts?.[0]?.base64 ??
+    data?.data?.[0]?.b64_json ??
+    null;
+
+  if (!b64) throw new Error('No image data returned from API');
 
   return Buffer.from(b64, 'base64');
 }
@@ -87,10 +106,10 @@ async function registerCommands(clientId) {
   const commands = [
     new SlashCommandBuilder()
       .setName('image')
-      .setDescription('Generate an image using FLUX.1-schnell AI')
+      .setDescription('Generate an image with FLUX.1-schnell')
       .addStringOption(opt =>
         opt.setName('prompt')
-          .setDescription('Describe the image you want to generate')
+          .setDescription('Describe the image you want')
           .setRequired(true)
       ),
   ].map(cmd => cmd.toJSON());
@@ -120,22 +139,21 @@ client.once(Events.ClientReady, async (bot) => {
   }, 5 * 60 * 1000);
 });
 
-// ── Slash command handler ──────────────────────────────────────────────────────
+// ── Slash command handler (/image) ─────────────────────────────────────────────
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   if (interaction.commandName === 'image') {
     const prompt = interaction.options.getString('prompt');
-
-    await interaction.deferReply(); // Show "thinking..." while generating
+    await interaction.deferReply();
 
     try {
       const imageBuffer = await generateImage(prompt);
-      const attachment  = new AttachmentBuilder(imageBuffer, { name: 'generated.png' });
+      const attachment  = new AttachmentBuilder(imageBuffer, { name: 'image.png' });
 
       await interaction.editReply({
-        content: `🎨 Here's your image for: **${prompt}**`,
-        files: [attachment],
+        content: `🎨 **${prompt}**`,
+        files:   [attachment],
       });
     } catch (err) {
       console.error('Image gen error:', err);
