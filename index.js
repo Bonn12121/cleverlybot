@@ -151,26 +151,71 @@ client.once(Events.ClientReady, async (bot) => {
   }, 5 * 60 * 1000);
 });
 
-// ── Slash command handler (/image) ─────────────────────────────────────────────
+// ── Interaction handler: /image + ratio select menu ───────────────────────────
 client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
 
-  if (interaction.commandName === 'image') {
+  // Step 1 — /image command → show ratio dropdown
+  if (interaction.isChatInputCommand() && interaction.commandName === 'image') {
     const prompt = interaction.options.getString('prompt');
-    await interaction.deferReply();
+    pendingImages.set(interaction.user.id, prompt);
+
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId('ratio_select')
+      .setPlaceholder('📐 Pick an aspect ratio...')
+      .addOptions([
+        { label: '1:1  — Square',     value: '1:1'  },
+        { label: '16:9 — Landscape',  value: '16:9' },
+        { label: '9:16 — Portrait',   value: '9:16' },
+        { label: '5:4  — Classic',    value: '5:4'  },
+        { label: '4:5  — Instagram',  value: '4:5'  },
+        { label: '3:2  — Photo',      value: '3:2'  },
+        { label: '2:3  — Tall Photo', value: '2:3'  },
+      ]);
+
+    const row = new ActionRowBuilder().addComponents(menu);
+
+    await interaction.reply({
+      content: `🎨 Prompt: **${prompt}**\n\n📐 Step 2 — Choose an aspect ratio:`,
+      components: [row],
+    });
+    return;
+  }
+
+  // Step 2 — ratio picked → generate image
+  if (interaction.isStringSelectMenu() && interaction.customId === 'ratio_select') {
+    const ratio  = interaction.values[0];
+    const prompt = pendingImages.get(interaction.user.id);
+    pendingImages.delete(interaction.user.id);
+
+    if (!prompt) {
+      await interaction.update({ content: '⚠️ Session expired. Run `/image` again.', components: [] });
+      return;
+    }
+
+    const { width, height } = RATIO_MAP[ratio];
+
+    await interaction.update({
+      content: `🎨 **${prompt}** | **${ratio}** (${width}×${height}) — ⏳ Generating...`,
+      components: [],
+    });
 
     try {
-      const imageBuffer = await generateImage(prompt);
-      const attachment  = new AttachmentBuilder(imageBuffer, { name: 'image.png' });
+      const imageBuffer = await generateImage(prompt, width, height);
+      const attachment  = new AttachmentBuilder(imageBuffer, { name: 'generated.png' });
 
       await interaction.editReply({
-        content: `🎨 **${prompt}**`,
-        files:   [attachment],
+        content:    `🎨 **${prompt}** | **${ratio}** (${width}×${height})`,
+        files:      [attachment],
+        components: [],
       });
     } catch (err) {
       console.error('Image gen error:', err);
-      await interaction.editReply(`⚠️ Failed to generate image: \`${err.message}\``);
+      await interaction.editReply({
+        content:    `⚠️ Failed to generate image: \`${err.message}\``,
+        components: [],
+      });
     }
+    return;
   }
 });
 
