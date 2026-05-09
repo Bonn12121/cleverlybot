@@ -90,13 +90,25 @@ async function generateImage(prompt, width = 1344, height = 768) {
 
   const data = await response.json();
 
-  // NVIDIA returns base64 under data[0].b64_json or artifacts[0].base64
+  // Log full response structure so we can debug
+  console.log('🖼️ FLUX API response keys:', JSON.stringify(Object.keys(data)));
+  if (data.artifacts) console.log('artifacts[0] keys:', JSON.stringify(Object.keys(data.artifacts[0] ?? {})));
+  if (data.data)      console.log('data[0] keys:',      JSON.stringify(Object.keys(data.data[0]      ?? {})));
+  if (data.images)    console.log('images[0] keys:',    JSON.stringify(Object.keys(data.images[0]    ?? {})));
+
+  // Try all known NVIDIA response shapes
   const b64 =
-    data?.artifacts?.[0]?.base64 ??
-    data?.data?.[0]?.b64_json ??
+    data?.image                  ??   // flux.2-klein direct
+    data?.images?.[0]            ??   // array of base64 strings
+    data?.artifacts?.[0]?.base64 ??   // SD3 style
+    data?.data?.[0]?.b64_json    ??   // OpenAI-compat style
+    data?.artifacts?.[0]?.b64_json ?? // alternate key
     null;
 
-  if (!b64) throw new Error('No image data returned from API');
+  if (!b64) {
+    console.error('❌ Full API response:', JSON.stringify(data));
+    throw new Error(`No image data returned from API. Keys: ${Object.keys(data).join(', ')}`);
+  }
 
   return Buffer.from(b64, 'base64');
 }
