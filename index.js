@@ -1,12 +1,12 @@
-import { Client, GatewayIntentBits, Events, REST, Routes, SlashCommandBuilder, AttachmentBuilder, ActionRowBuilder, StringSelectMenuBuilder, StringSelectMenuOptionBuilder } from 'discord.js';
+import { Client, GatewayIntentBits, Events, REST, Routes, SlashCommandBuilder, AttachmentBuilder, ActionRowBuilder, StringSelectMenuBuilder } from 'discord.js';
 import OpenAI from 'openai';
 import http from 'http';
 import fetch from 'node-fetch';
 
 // ── Configuration ──────────────────────────────────────────────────────────────
 const DISCORD_TOKEN   = process.env.DISCORD_TOKEN;
-const NVIDIA_API_KEY  = process.env.NVIDIA_API_KEY;
-const IMAGE_GEN_NVDA  = process.env.IMAGE_GEN_NVDA;
+const NVIDIA_API_KEY  = process.env.NVIDIA_API_KEY; // Kept for Qwen text chat
+const PUTER_TOKEN     = process.env.PUTER_TOKEN;    // Replaced IMAGE_GEN_NVDA
 const PORT            = process.env.PORT || 3000;
 
 // ── Ratio → width/height map ───────────────────────────────────────────────────
@@ -28,11 +28,11 @@ const FREE_CHAT_CHANNEL = 'chat-with-cleverly';
 // ── Validate env vars ──────────────────────────────────────────────────────────
 if (!DISCORD_TOKEN)  { console.error('❌ Missing DISCORD_TOKEN');   process.exit(1); }
 if (!NVIDIA_API_KEY) { console.error('❌ Missing NVIDIA_API_KEY');  process.exit(1); }
-if (!IMAGE_GEN_NVDA) { console.error('❌ Missing IMAGE_GEN_NVDA');  process.exit(1); }
+if (!PUTER_TOKEN)    { console.error('❌ Missing PUTER_TOKEN');     process.exit(1); }
 
 console.log('✅ DISCORD_TOKEN found:',  DISCORD_TOKEN.slice(0, 10)  + '...');
 console.log('✅ NVIDIA_API_KEY found:', NVIDIA_API_KEY.slice(0, 10) + '...');
-console.log('✅ IMAGE_GEN_NVDA found:', IMAGE_GEN_NVDA.slice(0, 10) + '...');
+console.log('✅ PUTER_TOKEN found:',    PUTER_TOKEN.slice(0, 10)    + '...');
 
 // ── HTTP keep-alive server ─────────────────────────────────────────────────────
 const server = http.createServer((req, res) => {
@@ -62,52 +62,37 @@ function addToHistory(channelId, role, content) {
   if (history.length > MAX_HISTORY) history.splice(0, history.length - MAX_HISTORY);
 }
 
-// ── Image generation via FLUX.1-schnell (NVIDIA) ───────────────────────────────
+// ── Image generation via Qwen Image 2.0 Pro (Puter) ────────────────────────────
 async function generateImage(prompt, width = 1344, height = 768) {
   const response = await fetch(
-    'https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.2-klein-4b',
+    'https://api.puter.com/puterai/openai/v1/images/generations',
     {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${IMAGE_GEN_NVDA}`,
+        'Authorization': `Bearer ${PUTER_TOKEN}`,
         'Content-Type':  'application/json',
         'Accept':        'application/json',
       },
       body: JSON.stringify({
-        prompt,
-        width,
-        height,
-        seed:   0,
-        steps:  4,
+        model: 'qwen/qwen-image-2.0-pro',
+        prompt: prompt,
+        size: `${width}x${height}`,
+        response_format: 'b64_json',
       }),
     }
   );
 
-  if (response.status !== 200) {
-    const err = await (await response.blob()).text();
-    throw new Error(`Image API error ${response.status}: ${err}`);
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Puter API error ${response.status}: ${err}`);
   }
 
   const data = await response.json();
-
-  // Log full response structure so we can debug
-  console.log('🖼️ FLUX API response keys:', JSON.stringify(Object.keys(data)));
-  if (data.artifacts) console.log('artifacts[0] keys:', JSON.stringify(Object.keys(data.artifacts[0] ?? {})));
-  if (data.data)      console.log('data[0] keys:',      JSON.stringify(Object.keys(data.data[0]      ?? {})));
-  if (data.images)    console.log('images[0] keys:',    JSON.stringify(Object.keys(data.images[0]    ?? {})));
-
-  // Try all known NVIDIA response shapes
-  const b64 =
-    data?.image                  ??   // flux.2-klein direct
-    data?.images?.[0]            ??   // array of base64 strings
-    data?.artifacts?.[0]?.base64 ??   // SD3 style
-    data?.data?.[0]?.b64_json    ??   // OpenAI-compat style
-    data?.artifacts?.[0]?.b64_json ?? // alternate key
-    null;
+  const b64 = data?.data?.[0]?.b64_json;
 
   if (!b64) {
     console.error('❌ Full API response:', JSON.stringify(data));
-    throw new Error(`No image data returned from API. Keys: ${Object.keys(data).join(', ')}`);
+    throw new Error(`No image data returned from API.`);
   }
 
   return Buffer.from(b64, 'base64');
@@ -118,7 +103,7 @@ async function registerCommands(clientId) {
   const commands = [
     new SlashCommandBuilder()
       .setName('image')
-      .setDescription('Generate an image with FLUX.1-schnell')
+      .setDescription('Generate an image with Qwen Image 2.0 Pro')
       .addStringOption(opt =>
         opt.setName('prompt')
           .setDescription('Describe the image you want')
@@ -153,7 +138,6 @@ client.once(Events.ClientReady, async (bot) => {
 
 // ── Interaction handler: /image + ratio select menu ───────────────────────────
 client.on(Events.InteractionCreate, async (interaction) => {
-
   // Step 1 — /image command → show ratio dropdown
   if (interaction.isChatInputCommand() && interaction.commandName === 'image') {
     const prompt = interaction.options.getString('prompt');
