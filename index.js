@@ -2,7 +2,7 @@ import { Client, GatewayIntentBits, Events, REST, Routes, SlashCommandBuilder, A
 import OpenAI from 'openai';
 import http from 'http';
 import fetch from 'node-fetch';
-import puter from '@heyputer/puter.js'; // Import chuẩn của Puter SDK
+import { init } from '@heyputer/puter.js/src/init.cjs'; // Dòng quan trọng để fix lỗi Unauthorized
 
 // ── Configuration ──────────────────────────────────────────────────────────────
 const DISCORD_TOKEN   = process.env.DISCORD_TOKEN;
@@ -22,7 +22,8 @@ console.log('✅ DISCORD_TOKEN found:',  DISCORD_TOKEN.slice(0, 10)  + '...');
 console.log('✅ NVIDIA_API_KEY found:', NVIDIA_API_KEY.slice(0, 10) + '...');
 console.log('✅ PUTER_TOKEN found:',    PUTER_TOKEN.slice(0, 10)    + '...');
 
-// Puter SDK automatically uses process.env.PUTER_TOKEN in Node.js environments
+// ── Initialize Puter SDK for Backend ───────────────────────────────────────────
+const puter = init(PUTER_TOKEN);
 
 // ── HTTP keep-alive server ─────────────────────────────────────────────────────
 const server = http.createServer((req, res) => {
