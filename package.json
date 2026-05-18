@@ -12,6 +12,6 @@
     "discord.js": "^14.15.3",
     "openai": "^4.52.7",
     "node-fetch": "^3.3.2",
-    "@heyputer/puter.js": "^1.1.20"
+    "@heyputer/puter.js": "*"
   }
 }
