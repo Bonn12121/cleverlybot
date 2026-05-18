@@ -1,28 +1,16 @@
-import { Client, GatewayIntentBits, Events, REST, Routes, SlashCommandBuilder, AttachmentBuilder, ActionRowBuilder, StringSelectMenuBuilder } from 'discord.js';
+import { Client, GatewayIntentBits, Events, REST, Routes, SlashCommandBuilder, AttachmentBuilder } from 'discord.js';
 import OpenAI from 'openai';
 import http from 'http';
 import fetch from 'node-fetch';
+import { init } from '@heyputer/puter.js/src/init.cjs';
 
 // ── Configuration ──────────────────────────────────────────────────────────────
 const DISCORD_TOKEN   = process.env.DISCORD_TOKEN;
-const NVIDIA_API_KEY  = process.env.NVIDIA_API_KEY; // Kept for Qwen text chat
-const PUTER_TOKEN     = process.env.PUTER_TOKEN;    // Replaced IMAGE_GEN_NVDA
+const NVIDIA_API_KEY  = process.env.NVIDIA_API_KEY; 
+const PUTER_TOKEN     = process.env.PUTER_TOKEN;    
 const PORT            = process.env.PORT || 3000;
 
-// ── Ratio → width/height map ───────────────────────────────────────────────────
-const RATIO_MAP = {
-  '1:1':  { width: 1024, height: 1024 },
-  '16:9': { width: 1344, height: 768  },
-  '9:16': { width: 768,  height: 1344 },
-  '5:4':  { width: 1152, height: 896  },
-  '4:5':  { width: 896,  height: 1152 },
-  '3:2':  { width: 1216, height: 832  },
-  '2:3':  { width: 832,  height: 1216 },
-};
-
-// Temp store: interactionId → prompt (while user picks ratio)
-const pendingImages = new Map();
-const BOT_NAME        = 'Cleverly';
+const BOT_NAME          = 'Cleverly';
 const FREE_CHAT_CHANNEL = 'chat-with-cleverly';
 
 // ── Validate env vars ──────────────────────────────────────────────────────────
@@ -33,6 +21,9 @@ if (!PUTER_TOKEN)    { console.error('❌ Missing PUTER_TOKEN');     process.exi
 console.log('✅ DISCORD_TOKEN found:',  DISCORD_TOKEN.slice(0, 10)  + '...');
 console.log('✅ NVIDIA_API_KEY found:', NVIDIA_API_KEY.slice(0, 10) + '...');
 console.log('✅ PUTER_TOKEN found:',    PUTER_TOKEN.slice(0, 10)    + '...');
+
+// ── Initialize Puter SDK ───────────────────────────────────────────────────────
+const puter = init(PUTER_TOKEN);
 
 // ── HTTP keep-alive server ─────────────────────────────────────────────────────
 const server = http.createServer((req, res) => {
@@ -62,40 +53,33 @@ function addToHistory(channelId, role, content) {
   if (history.length > MAX_HISTORY) history.splice(0, history.length - MAX_HISTORY);
 }
 
-// ── Image generation via Qwen Image 2.0 Pro (Puter) ────────────────────────────
-async function generateImage(prompt, width = 1344, height = 768) {
-  const response = await fetch(
-    'https://api.puter.com/puterai/openai/v1/images/generations',
-    {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${PUTER_TOKEN}`,
-        'Content-Type':  'application/json',
-        'Accept':        'application/json',
-      },
-      body: JSON.stringify({
-        model: 'qwen/qwen-image-2.0-pro',
-        prompt: prompt,
-        size: `${width}x${height}`,
-        response_format: 'b64_json',
-      }),
-    }
-  );
+// ── Image generation via Qwen Image 2.0 Pro (Puter SDK) ────────────────────────
+async function generateImage(prompt) {
+  // Yêu cầu Puter trả về dưới dạng đường dẫn URL hoặc Base64
+  const result = await puter.ai.txt2img(prompt, {
+    model: 'qwen/qwen-image-2.0-pro',
+    response_format: 'url'
+  });
 
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Puter API error ${response.status}: ${err}`);
+  // Puter SDK đôi khi trả về trực tiếp string, hoặc object chứa url/base64
+  const url = typeof result === 'string' && result.startsWith('http') ? result : result?.url;
+
+  if (url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Failed to fetch generated image: ${res.statusText}`);
+    const arrayBuffer = await res.arrayBuffer();
+    return Buffer.from(arrayBuffer);
   }
 
-  const data = await response.json();
-  const b64 = data?.data?.[0]?.b64_json;
-
+  // Dự phòng nếu kết quả trả về là Base64
+  const b64 = typeof result === 'string' ? result : (result?.base64 || result?.b64_json || result?.image);
   if (!b64) {
-    console.error('❌ Full API response:', JSON.stringify(data));
-    throw new Error(`No image data returned from API.`);
+    console.error('❌ Full API response:', JSON.stringify(result));
+    throw new Error('Không nhận được dữ liệu ảnh hợp lệ từ API.');
   }
 
-  return Buffer.from(b64, 'base64');
+  const cleanB64 = b64.includes(',') ? b64.split(',')[1] : b64;
+  return Buffer.from(cleanB64, 'base64');
 }
 
 // ── Register slash commands ────────────────────────────────────────────────────
@@ -136,70 +120,29 @@ client.once(Events.ClientReady, async (bot) => {
   }, 5 * 60 * 1000);
 });
 
-// ── Interaction handler: /image + ratio select menu ───────────────────────────
+// ── Interaction handler: /image ───────────────────────────────────────────────
 client.on(Events.InteractionCreate, async (interaction) => {
-  // Step 1 — /image command → show ratio dropdown
   if (interaction.isChatInputCommand() && interaction.commandName === 'image') {
     const prompt = interaction.options.getString('prompt');
-    pendingImages.set(interaction.user.id, prompt);
-
-    const menu = new StringSelectMenuBuilder()
-      .setCustomId('ratio_select')
-      .setPlaceholder('📐 Pick an aspect ratio...')
-      .addOptions([
-        { label: '1:1  — Square',     value: '1:1'  },
-        { label: '16:9 — Landscape',  value: '16:9' },
-        { label: '9:16 — Portrait',   value: '9:16' },
-        { label: '5:4  — Classic',    value: '5:4'  },
-        { label: '4:5  — Instagram',  value: '4:5'  },
-        { label: '3:2  — Photo',      value: '3:2'  },
-        { label: '2:3  — Tall Photo', value: '2:3'  },
-      ]);
-
-    const row = new ActionRowBuilder().addComponents(menu);
 
     await interaction.reply({
-      content: `🎨 Prompt: **${prompt}**\n\n📐 Step 2 — Choose an aspect ratio:`,
-      components: [row],
-    });
-    return;
-  }
-
-  // Step 2 — ratio picked → generate image
-  if (interaction.isStringSelectMenu() && interaction.customId === 'ratio_select') {
-    const ratio  = interaction.values[0];
-    const prompt = pendingImages.get(interaction.user.id);
-    pendingImages.delete(interaction.user.id);
-
-    if (!prompt) {
-      await interaction.update({ content: '⚠️ Session expired. Run `/image` again.', components: [] });
-      return;
-    }
-
-    const { width, height } = RATIO_MAP[ratio];
-
-    await interaction.update({
-      content: `🎨 **${prompt}** | **${ratio}** (${width}×${height}) — ⏳ Generating...`,
-      components: [],
+      content: `🎨 **Prompt:** ${prompt} — ⏳ Đang vẽ...`,
     });
 
     try {
-      const imageBuffer = await generateImage(prompt, width, height);
+      const imageBuffer = await generateImage(prompt);
       const attachment  = new AttachmentBuilder(imageBuffer, { name: 'generated.png' });
 
       await interaction.editReply({
-        content:    `🎨 **${prompt}** | **${ratio}** (${width}×${height})`,
-        files:      [attachment],
-        components: [],
+        content: `🎨 **${prompt}**`,
+        files: [attachment],
       });
     } catch (err) {
       console.error('Image gen error:', err);
       await interaction.editReply({
-        content:    `⚠️ Failed to generate image: \`${err.message}\``,
-        components: [],
+        content: `⚠️ Quá trình vẽ ảnh gặp lỗi: \`${err.message}\``,
       });
     }
-    return;
   }
 });
 
