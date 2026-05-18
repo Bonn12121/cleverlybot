@@ -2,7 +2,7 @@ import { Client, GatewayIntentBits, Events, REST, Routes, SlashCommandBuilder, A
 import OpenAI from 'openai';
 import http from 'http';
 import fetch from 'node-fetch';
-import { init } from '@heyputer/puter.js/src/init.cjs'; // Dòng quan trọng để fix lỗi Unauthorized
+import { init } from '@heyputer/puter.js/src/init.cjs';
 
 // ── Configuration ──────────────────────────────────────────────────────────────
 const DISCORD_TOKEN   = process.env.DISCORD_TOKEN;
@@ -59,55 +59,65 @@ async function generateImage(prompt) {
     model: 'qwen/qwen-image-2.0-pro'
   });
 
-  // 1. If result is already a Node.js Buffer
-  if (Buffer.isBuffer(result)) {
-    return result;
+  // Extract the actual image data from the returned object.
+  // In Node.js, Puter.js often returns a mock HTMLImageElement with a .src property.
+  let imageData = result;
+  if (result && typeof result === 'object' && result.src) {
+    imageData = result.src;
   }
 
-  // 2. If result is an ArrayBuffer
-  if (result instanceof ArrayBuffer) {
-    return Buffer.from(result);
-  }
-
-  // 3. If result is a Blob / Fetch Response (has .arrayBuffer method)
-  if (result && typeof result.arrayBuffer === 'function') {
-    const arr = await result.arrayBuffer();
-    return Buffer.from(arr);
-  }
-
-  // 4. If result is a direct String (URL or Base64)
-  if (typeof result === 'string') {
-    if (result.startsWith('http')) {
-      const res = await fetch(result);
-      if (!res.ok) throw new Error(`Failed to fetch image: ${res.statusText}`);
+  // 1. If it's a URL or Data URI (Base64 string)
+  if (typeof imageData === 'string') {
+    if (imageData.startsWith('http')) {
+      const res = await fetch(imageData);
+      if (!res.ok) throw new Error(`HTTP error while fetching image URL: ${res.statusText}`);
       const arr = await res.arrayBuffer();
       return Buffer.from(arr);
     }
-    // Assume Base64 string
-    const b64 = result.includes(',') ? result.split(',')[1] : result;
+    
+    // It's a Base64 string or Data URI
+    let b64 = imageData;
+    if (b64.includes('base64,')) {
+      b64 = b64.split('base64,')[1]; // Extract raw base64 after the comma
+    } else if (b64.includes(',')) {
+      b64 = b64.split(',')[1];
+    }
     return Buffer.from(b64, 'base64');
   }
 
-  // 5. If result is an Object containing URL or Base64
-  if (result && typeof result === 'object') {
-    const url = result.url;
+  // 2. If it's a Node.js Buffer
+  if (Buffer.isBuffer(imageData)) return imageData;
+
+  // 3. If it's an ArrayBuffer
+  if (imageData instanceof ArrayBuffer) return Buffer.from(imageData);
+
+  // 4. If it has an arrayBuffer() method (like a Fetch Response or Blob)
+  if (imageData && typeof imageData.arrayBuffer === 'function') {
+    const arr = await imageData.arrayBuffer();
+    return Buffer.from(arr);
+  }
+
+  // 5. Fallback for raw JSON objects with base64 / url fields
+  if (imageData && typeof imageData === 'object') {
+    const url = imageData.url;
     if (url) {
       const res = await fetch(url);
-      if (!res.ok) throw new Error(`Failed to fetch image: ${res.statusText}`);
+      if (!res.ok) throw new Error(`HTTP error while fetching fallback URL: ${res.statusText}`);
       const arr = await res.arrayBuffer();
       return Buffer.from(arr);
     }
 
-    const b64 = result.base64 || result.b64_json || result.image;
+    const b64 = imageData.base64 || imageData.b64_json || imageData.image || imageData.data;
     if (b64) {
-      const cleanB64 = b64.includes(',') ? b64.split(',')[1] : b64;
-      return Buffer.from(cleanB64, 'base64');
+      const clean = b64.includes(',') ? b64.split(',')[1] : b64;
+      return Buffer.from(clean, 'base64');
     }
   }
 
-  // Fallback error if we can't parse it
-  console.error('❌ Unhandled API response:', result);
-  throw new Error('Did not receive valid image data from API.');
+  // If everything fails, log the object keys to help debugging so it's not a blind error
+  const keys = result && typeof result === 'object' ? Object.keys(result).join(', ') : 'No keys';
+  console.error('❌ Unhandled API response format:', result);
+  throw new Error(`Did not receive valid image data. Received type: ${typeof result}. Object keys: [${keys}]`);
 }
 
 // ── Register slash commands ────────────────────────────────────────────────────
