@@ -2,7 +2,7 @@ import { Client, GatewayIntentBits, Events, REST, Routes, SlashCommandBuilder, A
 import OpenAI from 'openai';
 import http from 'http';
 import fetch from 'node-fetch';
-import { init } from '@heyputer/puter.js/src/init.cjs';
+import puter from '@heyputer/puter.js'; // Import chuẩn của Puter SDK
 
 // ── Configuration ──────────────────────────────────────────────────────────────
 const DISCORD_TOKEN   = process.env.DISCORD_TOKEN;
@@ -22,8 +22,7 @@ console.log('✅ DISCORD_TOKEN found:',  DISCORD_TOKEN.slice(0, 10)  + '...');
 console.log('✅ NVIDIA_API_KEY found:', NVIDIA_API_KEY.slice(0, 10) + '...');
 console.log('✅ PUTER_TOKEN found:',    PUTER_TOKEN.slice(0, 10)    + '...');
 
-// ── Initialize Puter SDK ───────────────────────────────────────────────────────
-const puter = init(PUTER_TOKEN);
+// Puter SDK automatically uses process.env.PUTER_TOKEN in Node.js environments
 
 // ── HTTP keep-alive server ─────────────────────────────────────────────────────
 const server = http.createServer((req, res) => {
@@ -55,31 +54,59 @@ function addToHistory(channelId, role, content) {
 
 // ── Image generation via Qwen Image 2.0 Pro (Puter SDK) ────────────────────────
 async function generateImage(prompt) {
-  // Yêu cầu Puter trả về dưới dạng đường dẫn URL hoặc Base64
   const result = await puter.ai.txt2img(prompt, {
-    model: 'qwen/qwen-image-2.0-pro',
-    response_format: 'url'
+    model: 'qwen/qwen-image-2.0-pro'
   });
 
-  // Puter SDK đôi khi trả về trực tiếp string, hoặc object chứa url/base64
-  const url = typeof result === 'string' && result.startsWith('http') ? result : result?.url;
-
-  if (url) {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Failed to fetch generated image: ${res.statusText}`);
-    const arrayBuffer = await res.arrayBuffer();
-    return Buffer.from(arrayBuffer);
+  // 1. If result is already a Node.js Buffer
+  if (Buffer.isBuffer(result)) {
+    return result;
   }
 
-  // Dự phòng nếu kết quả trả về là Base64
-  const b64 = typeof result === 'string' ? result : (result?.base64 || result?.b64_json || result?.image);
-  if (!b64) {
-    console.error('❌ Full API response:', JSON.stringify(result));
-    throw new Error('Không nhận được dữ liệu ảnh hợp lệ từ API.');
+  // 2. If result is an ArrayBuffer
+  if (result instanceof ArrayBuffer) {
+    return Buffer.from(result);
   }
 
-  const cleanB64 = b64.includes(',') ? b64.split(',')[1] : b64;
-  return Buffer.from(cleanB64, 'base64');
+  // 3. If result is a Blob / Fetch Response (has .arrayBuffer method)
+  if (result && typeof result.arrayBuffer === 'function') {
+    const arr = await result.arrayBuffer();
+    return Buffer.from(arr);
+  }
+
+  // 4. If result is a direct String (URL or Base64)
+  if (typeof result === 'string') {
+    if (result.startsWith('http')) {
+      const res = await fetch(result);
+      if (!res.ok) throw new Error(`Failed to fetch image: ${res.statusText}`);
+      const arr = await res.arrayBuffer();
+      return Buffer.from(arr);
+    }
+    // Assume Base64 string
+    const b64 = result.includes(',') ? result.split(',')[1] : result;
+    return Buffer.from(b64, 'base64');
+  }
+
+  // 5. If result is an Object containing URL or Base64
+  if (result && typeof result === 'object') {
+    const url = result.url;
+    if (url) {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Failed to fetch image: ${res.statusText}`);
+      const arr = await res.arrayBuffer();
+      return Buffer.from(arr);
+    }
+
+    const b64 = result.base64 || result.b64_json || result.image;
+    if (b64) {
+      const cleanB64 = b64.includes(',') ? b64.split(',')[1] : b64;
+      return Buffer.from(cleanB64, 'base64');
+    }
+  }
+
+  // Fallback error if we can't parse it
+  console.error('❌ Unhandled API response:', result);
+  throw new Error('Did not receive valid image data from API.');
 }
 
 // ── Register slash commands ────────────────────────────────────────────────────
@@ -126,7 +153,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const prompt = interaction.options.getString('prompt');
 
     await interaction.reply({
-      content: `🎨 **Prompt:** ${prompt} — ⏳ Đang vẽ...`,
+      content: `🎨 **Prompt:** ${prompt} — ⏳ Generating...`,
     });
 
     try {
@@ -140,7 +167,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     } catch (err) {
       console.error('Image gen error:', err);
       await interaction.editReply({
-        content: `⚠️ Quá trình vẽ ảnh gặp lỗi: \`${err.message}\``,
+        content: `⚠️ Failed to generate image: \`${err.message}\``,
       });
     }
   }
