@@ -1,12 +1,13 @@
-import { Client, GatewayIntentBits, Events, REST, Routes, SlashCommandBuilder, AttachmentBuilder, ActionRowBuilder, StringSelectMenuBuilder } from 'discord.js';
+import { Client, GatewayIntentBits, Events, REST, Routes, SlashCommandBuilder, AttachmentBuilder } from 'discord.js';
 import OpenAI from 'openai';
 import http from 'http';
 import fetch from 'node-fetch';
+import { init } from '@heyputer/puter.js/src/init.cjs';
 
 // ── Configuration ──────────────────────────────────────────────────────────────
 const DISCORD_TOKEN   = process.env.DISCORD_TOKEN;
 const NVIDIA_API_KEY  = process.env.NVIDIA_API_KEY; 
-const GEMINI_API_KEY  = process.env.GEMINI_API_KEY;    
+const PUTER_TOKEN     = process.env.PUTER_TOKEN;    
 const PORT            = process.env.PORT || 3000;
 
 const BOT_NAME          = 'Cleverly';
@@ -15,11 +16,14 @@ const FREE_CHAT_CHANNEL = 'chat-with-cleverly';
 // ── Validate env vars ──────────────────────────────────────────────────────────
 if (!DISCORD_TOKEN)  { console.error('❌ Missing DISCORD_TOKEN');   process.exit(1); }
 if (!NVIDIA_API_KEY) { console.error('❌ Missing NVIDIA_API_KEY');  process.exit(1); }
-if (!GEMINI_API_KEY) { console.error('❌ Missing GEMINI_API_KEY');  process.exit(1); }
+if (!PUTER_TOKEN)    { console.error('❌ Missing PUTER_TOKEN');     process.exit(1); }
 
 console.log('✅ DISCORD_TOKEN found:',  DISCORD_TOKEN.slice(0, 10)  + '...');
 console.log('✅ NVIDIA_API_KEY found:', NVIDIA_API_KEY.slice(0, 10) + '...');
-console.log('✅ GEMINI_API_KEY found:', GEMINI_API_KEY.slice(0, 10) + '...');
+console.log('✅ PUTER_TOKEN found:',    PUTER_TOKEN.slice(0, 10)    + '...');
+
+// ── Initialize Puter SDK for Backend ───────────────────────────────────────────
+const puter = init(PUTER_TOKEN);
 
 // ── HTTP keep-alive server ─────────────────────────────────────────────────────
 const server = http.createServer((req, res) => {
@@ -49,51 +53,71 @@ function addToHistory(channelId, role, content) {
   if (history.length > MAX_HISTORY) history.splice(0, history.length - MAX_HISTORY);
 }
 
-// ── Image generation via Google Gemini API ─────────────────────────────────────
-async function generateImage(prompt, ratio) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent?key=${GEMINI_API_KEY}`;
-  
-  const payload = {
-    contents: [
-      {
-        parts: [{ text: prompt }]
-      }
-    ],
-    generationConfig: {
-      responseModalities: ["IMAGE"],
-      imageConfig: {
-        aspectRatio: ratio
-      }
-    }
-  };
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
+// ── Image generation via Qwen Image 2.0 Pro (Puter SDK) ────────────────────────
+async function generateImage(prompt) {
+  const result = await puter.ai.txt2img(prompt, {
+    model: 'gpt-image-2'
   });
 
-  if (!res.ok) {
-    const errorText = await res.text();
-    throw new Error(`Gemini API Error: ${res.status} - ${errorText}`);
+  // Extract the actual image data from the returned object.
+  // In Node.js, Puter.js often returns a mock HTMLImageElement with a .src property.
+  let imageData = result;
+  if (result && typeof result === 'object' && result.src) {
+    imageData = result.src;
   }
 
-  const data = await res.json();
-  
-  try {
-    // Gemini 3 Pro có thể trả về cả Text & Image, ta cần duyệt tìm phần Image (inlineData)
-    const candidate = data.candidates[0];
-    const part = candidate.content.parts.find(p => p.inlineData);
-    
-    if (!part || !part.inlineData || !part.inlineData.data) {
-      throw new Error("No image data returned in the response.");
+  // 1. If it's a URL or Data URI (Base64 string)
+  if (typeof imageData === 'string') {
+    if (imageData.startsWith('http')) {
+      const res = await fetch(imageData);
+      if (!res.ok) throw new Error(`HTTP error while fetching image URL: ${res.statusText}`);
+      const arr = await res.arrayBuffer();
+      return Buffer.from(arr);
     }
     
-    return Buffer.from(part.inlineData.data, 'base64');
-  } catch (err) {
-    console.error('❌ Unexpected response structure:', JSON.stringify(data, null, 2));
-    throw new Error('Did not receive valid image data from API.');
+    // It's a Base64 string or Data URI
+    let b64 = imageData;
+    if (b64.includes('base64,')) {
+      b64 = b64.split('base64,')[1]; // Extract raw base64 after the comma
+    } else if (b64.includes(',')) {
+      b64 = b64.split(',')[1];
+    }
+    return Buffer.from(b64, 'base64');
   }
+
+  // 2. If it's a Node.js Buffer
+  if (Buffer.isBuffer(imageData)) return imageData;
+
+  // 3. If it's an ArrayBuffer
+  if (imageData instanceof ArrayBuffer) return Buffer.from(imageData);
+
+  // 4. If it has an arrayBuffer() method (like a Fetch Response or Blob)
+  if (imageData && typeof imageData.arrayBuffer === 'function') {
+    const arr = await imageData.arrayBuffer();
+    return Buffer.from(arr);
+  }
+
+  // 5. Fallback for raw JSON objects with base64 / url fields
+  if (imageData && typeof imageData === 'object') {
+    const url = imageData.url;
+    if (url) {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP error while fetching fallback URL: ${res.statusText}`);
+      const arr = await res.arrayBuffer();
+      return Buffer.from(arr);
+    }
+
+    const b64 = imageData.base64 || imageData.b64_json || imageData.image || imageData.data;
+    if (b64) {
+      const clean = b64.includes(',') ? b64.split(',')[1] : b64;
+      return Buffer.from(clean, 'base64');
+    }
+  }
+
+  // If everything fails, log the object keys to help debugging so it's not a blind error
+  const keys = result && typeof result === 'object' ? Object.keys(result).join(', ') : 'No keys';
+  console.error('❌ Unhandled API response format:', result);
+  throw new Error(`Did not receive valid image data. Received type: ${typeof result}. Object keys: [${keys}]`);
 }
 
 // ── Register slash commands ────────────────────────────────────────────────────
@@ -101,7 +125,7 @@ async function registerCommands(clientId) {
   const commands = [
     new SlashCommandBuilder()
       .setName('image')
-      .setDescription('Generate an image with Gemini 3 Pro')
+      .setDescription('Generate an image with Cleverly')
       .addStringOption(opt =>
         opt.setName('prompt')
           .setDescription('Describe the image you want')
@@ -134,66 +158,21 @@ client.once(Events.ClientReady, async (bot) => {
   }, 5 * 60 * 1000);
 });
 
-// ── State for pending ratio selections ─────────────────────────────────────────
-const pendingImages = new Map();
-const RATIOS = [
-  { label: '1:1', value: '1:1' },
-  { label: '1:4', value: '1:4' },
-  { label: '1:8', value: '1:8' },
-  { label: '2:3', value: '2:3' },
-  { label: '3:2', value: '3:2' },
-  { label: '3:4', value: '3:4' },
-  { label: '4:1', value: '4:1' },
-  { label: '4:3', value: '4:3' },
-  { label: '4:5', value: '4:5' },
-  { label: '5:4', value: '5:4' },
-  { label: '8:1', value: '8:1' },
-  { label: '9:16', value: '9:16' },
-  { label: '16:9', value: '16:9' },
-  { label: '21:9', value: '21:9' }
-];
-
 // ── Interaction handler: /image ───────────────────────────────────────────────
 client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.isChatInputCommand() && interaction.commandName === 'image') {
     const prompt = interaction.options.getString('prompt');
-    pendingImages.set(interaction.user.id, prompt);
-
-    const menu = new StringSelectMenuBuilder()
-      .setCustomId('ratio_select')
-      .setPlaceholder('📐 Pick an aspect ratio...')
-      .addOptions(RATIOS);
-
-    const row = new ActionRowBuilder().addComponents(menu);
 
     await interaction.reply({
-      content: `🎨 **Prompt:** ${prompt}\n\n📐 Step 2 — Choose an aspect ratio:`,
-      components: [row],
-    });
-    return;
-  }
-
-  if (interaction.isStringSelectMenu() && interaction.customId === 'ratio_select') {
-    const ratio  = interaction.values[0];
-    const prompt = pendingImages.get(interaction.user.id);
-    pendingImages.delete(interaction.user.id);
-
-    if (!prompt) {
-      await interaction.update({ content: '⚠️ Session expired. Run `/image` again.', components: [] });
-      return;
-    }
-
-    await interaction.update({
-      content: `🎨 **Prompt:** ${prompt} | **Ratio:** ${ratio} — ⏳ Generating...`,
-      components: [],
+      content: `🎨 **Prompt:** ${prompt} — ⏳ Generating...`,
     });
 
     try {
-      const imageBuffer = await generateImage(prompt, ratio);
+      const imageBuffer = await generateImage(prompt);
       const attachment  = new AttachmentBuilder(imageBuffer, { name: 'generated.png' });
 
       await interaction.editReply({
-        content: `🎨 **${prompt}** | **Ratio:** ${ratio}`,
+        content: `🎨 **${prompt}**`,
         files: [attachment],
       });
     } catch (err) {
