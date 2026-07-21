@@ -249,11 +249,11 @@ client.on(Events.MessageCreate, async (message) => {
 
   try {
     const stream = await openai.chat.completions.create({
-      model:       'qwen/qwen3-coder-480b-a35b-instruct',
+      model:       'deepseek-ai/deepseek-v4-flash',
       messages:    apiMessages,
-      temperature: 0.7,
-      top_p:       0.8,
-      max_tokens:  1024,
+      temperature: 1,
+      top_p:       0.95,
+      max_tokens:  16384,
       stream:      true,
     });
 
